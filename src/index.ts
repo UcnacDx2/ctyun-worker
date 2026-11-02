@@ -181,6 +181,14 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       return json({ ok: true, desktops: url.searchParams.get("raw") ? desktops : desktops.map(slimDesktop) });
     }
 
+    // 云机状态原样返回（网页身份，不占会话）。用来观察平台的休眠/关机倒计时字段。
+    if (method === "GET" && action === "dstatus") {
+      const desktops = await withClient(store, row, env, (c) => c.listDesktops());
+      const target = desktops.find((d) => desktopId(d) === url.searchParams.get("desktopId")) ?? desktops[0];
+      if (!target) return json({ ok: false, error: "云电脑不存在" }, 404);
+      return json({ ok: true, status: await withClient(store, row, env, (c) => c.desktopStatus(target)) });
+    }
+
     if (method === "GET" && action === "tasks") {
       return json({ ok: true, tasks: await withClient(store, row, env, (c) => c.tasks()) });
     }
@@ -211,7 +219,11 @@ async function route(request: Request, env: Env, url: URL): Promise<Response> {
       const desktops = await withClient(store, row, env, (c) => c.listDesktops());
       const target = desktops.find((d) => desktopId(d) === body.desktopId);
       if (!target) return json({ ok: false, error: "云电脑不存在" }, 404);
-      const info = await withClient(store, row, env, (c) => c.connect(target));
+      // 必须先补网页登录态：connect 走的是网页身份，直接用保存的原生 secretKey 会回 40010
+      const info = await withClient(store, row, env, async (c) => {
+        await c.loginWeb();
+        return c.connect(target);
+      });
       await store.log(id, "keepalive", `取得连接信息：${info.clinkLvsOutHost}`);
       return json({ ok: true, connection: { ...info, token: info.token ? "已获取" : "" } });
     }

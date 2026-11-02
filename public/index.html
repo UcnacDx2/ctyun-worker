@@ -38,8 +38,8 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const main = $("#main");
 let accountsCache = [];
-// 一轮挂多久（秒），从 /api/keepalive 读，用来判断"建立中"是不是已经断了
-let pulseSeconds = 300;
+// 一轮的封顶时长（秒），从 /api/keepalive 读，用来判断"建立中"是不是已经断了
+let pulseSeconds = 60;
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -67,7 +67,7 @@ function ago(ts) {
   return `${Math.round(s / 86400)} 天前`;
 }
 
-// 最近一次脉冲的状态。一轮最多 9 分钟；超过 15 分钟还停在 running，
+// 最近一次脉冲的状态。一轮就是几十秒；超出封顶 + 3 分钟还停在 running，
 // 说明那一轮被打断（部署 / DO 回收），不能一直显示「建立中」。
 function pulseState(r) {
   if (!r) return { label: "尚未运行", tone: "" };
@@ -97,7 +97,8 @@ async function dashboard() {
   const [{ accounts }, scheduler] = await Promise.all([api("/api/accounts"), api("/api/keepalive")]);
   accountsCache = accounts;
   if (scheduler.pulseSeconds) pulseSeconds = scheduler.pulseSeconds;
-  const every = scheduler.pulseIntervalMinutes ?? 30;
+  const every = scheduler.pulseIntervalMinutes ?? 20;
+  const afterActivateSeconds = scheduler.pulseAfterActivateSeconds ?? 15;
   const running = accounts.filter((a) => a.keepalive).length;
   const last = accounts.map((a) => a.lastResult).filter(Boolean).sort((x, y) => Date.parse(y.at) - Date.parse(x.at))[0];
   const tone = running ? "success" : "warning";
@@ -109,7 +110,7 @@ async function dashboard() {
       <article class="panel metric-card metric-${running ? "result" : "warning"}">
         <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">cloud_sync</span></span><span class="metric-label">云电脑保活</span><i class="metric-status-dot ${tone}"></i></div>
         <strong class="metric-value small">${running ? "保活中" : "已停止"}</strong>
-        <span class="metric-note">${running ? `每 ${every} 分钟连一次，每次 ${Math.round(pulseSeconds / 60)} 分钟` : "没有账号在保活"}</span>
+        <span class="metric-note">${running ? `每 ${every} 分钟连一次，激活后 ${afterActivateSeconds}s 收工` : "没有账号在保活"}</span>
       </article>
       <article class="panel metric-card metric-accounts">
         <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">group</span></span><span class="metric-label">账号概况</span></div>

@@ -436,7 +436,13 @@ export class CtYunClient {
    * 收 103 → 回 userInfo + mainClientLoginInfo + 104 → 每 5 秒心跳 7。
    * 协议这几步都已被实测验证为必需，不再保留逐项关掉的消融开关。
    */
-  async runClink(opts: { desktopId?: string; holdMs: number; shouldStop?: () => Promise<boolean> }): Promise<SessionResult> {
+  async runClink(opts: {
+    desktopId?: string;
+    holdMs: number;
+    /** 激活后再挂多久就收工；不传就一直挂满 holdMs */
+    exitAfterMs?: number;
+    shouldStop?: () => Promise<boolean>;
+  }): Promise<SessionResult> {
     const out: SessionResult = { ok: false, activated: false, heldSeconds: 0, frames: [], close: null, steps: [] };
     const t0 = Date.now();
     const state: { closed: { code: number; reason: string } | null } = { closed: null };
@@ -544,10 +550,17 @@ export class CtYunClient {
       ws.send(INITIAL_PAYLOAD);
       out.steps.push("握手帧 + initialPayload 已发");
 
-      // 保持阶段：到点、被断、或用户手动停止就退出
-      const deadline = Date.now() + opts.holdMs;
+      // 保持阶段：到点、被断、或用户手动停止就退出。
+      // 已经激活过就不必真挂满 holdMs —— 连接信号送到就够了，
+      // 所以激活后再停 exitAfterMs 就走（holdMs 退化成"最坏情况的封顶"）。
+      const hardDeadline = Date.now() + opts.holdMs;
+      let softDeadline = 0;
       let lastCheck = 0;
-      while (Date.now() < deadline && !state.closed) {
+      while (Date.now() < Math.min(hardDeadline, softDeadline || hardDeadline) && !state.closed) {
+        if (out.activated && softDeadline === 0 && opts.exitAfterMs !== undefined) {
+          softDeadline = Date.now() + opts.exitAfterMs;
+          out.steps.push(`已激活，再保持 ${Math.round(opts.exitAfterMs / 1000)}s 后收工`);
+        }
         await sleep(1000);
         if (Date.now() - lastCheck > 10_000 && opts.shouldStop) {
           lastCheck = Date.now();
@@ -698,6 +711,18 @@ export class CtYunClient {
     throw new CtYunError("", `网页登录失败：${(last as Error)?.message ?? last}`);
   }
 
+
+  /**
+   * 云机状态（网页身份）：和 connect 同一个接口族，但不占用会话，只读。
+   * 返回原始报文 —— 平台会往里塞各种带时间的字段，换个账号/版本就可能多几个，
+   * 做成强类型反而看不到。
+   */
+  async desktopStatus(d: Desktop): Promise<unknown> {
+    await this.loginWeb();
+    const h = this.webSignedHeaders(W_VERSION);
+    const q = new URLSearchParams({ desktopId: desktopId(d), specifiedCertCategory: "1" });
+    return this.request("GET", `${PC_ORIGIN}/api/desktop/client/status?${q}`, h);
+  }
 
   /** 取 Clink 连接信息：先确保有网页登录态（原生身份登录不覆盖它） */
   async connect(d: Desktop): Promise<ConnectionInfo> {

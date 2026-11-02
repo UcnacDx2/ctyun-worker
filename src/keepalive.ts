@@ -16,18 +16,22 @@ export interface Env {
   CRED_KEY?: string;
   PULSE_SECONDS?: string;
   PULSE_INTERVAL_MINUTES?: string;
+  PULSE_AFTER_ACTIVATE_SECONDS?: string;
 }
 
 /**
  * 一轮会话挂多久、两轮隔多久。
  *
  * 公众版云电脑的规则是「断开连接 1 小时后自动休眠，24 小时后自动关机」，
- * 所以只要保证每次连接间隔短于 1 小时就够了，不用一直挂着：
- * 默认挂 5 分钟、隔 30 分钟 —— 最长空闲 25 分钟，留足余量，也不浪费额度。
- * 想改频率不用改代码，动 wrangler.jsonc 的 vars 即可。
+ * 所以只要保证每次连接间隔短于 1 小时就够了，不用一直挂着：默认隔 20 分钟连一次。
+ *
+ * 而平台认的是「连接信号」而不是时长 —— 收到 103（进桌面的登录握手完成）就算数，
+ * 所以激活后再停十几秒就收工，PULSE_SECONDS 退化成"平台反应慢时的封顶"。
+ * 想改这些值不用动代码，改 wrangler.jsonc 的 vars 即可。
  */
-export const DEFAULT_PULSE_SECONDS = 300;
-export const DEFAULT_PULSE_INTERVAL_MINUTES = 30;
+export const DEFAULT_PULSE_SECONDS = 60;
+export const DEFAULT_PULSE_INTERVAL_MINUTES = 20;
+export const DEFAULT_PULSE_AFTER_ACTIVATE_SECONDS = 15;
 
 export function pulseMs(env: Env): number {
   return Math.max(30, Number(env.PULSE_SECONDS ?? DEFAULT_PULSE_SECONDS)) * 1000;
@@ -35,6 +39,15 @@ export function pulseMs(env: Env): number {
 
 export function pulseIntervalMs(env: Env): number {
   return Math.max(5, Number(env.PULSE_INTERVAL_MINUTES ?? DEFAULT_PULSE_INTERVAL_MINUTES)) * 60_000;
+}
+
+/**
+ * 会话激活之后再挂多久就收工。
+ * 平台要的是"连接信号"，不是时长：激活 = 已经进桌面的登录握手完成，
+ * 再挂十几秒就足够让这一轮算数。PULSE_SECONDS 退化成"平台反应慢时的封顶"。
+ */
+export function pulseAfterActivateMs(env: Env): number {
+  return Math.max(0, Number(env.PULSE_AFTER_ACTIVATE_SECONDS ?? DEFAULT_PULSE_AFTER_ACTIVATE_SECONDS)) * 1000;
 }
 
 export type AccountRowOf = {
@@ -107,14 +120,20 @@ export async function runPulse(store: Store, row: AccountRowOf, env: Env, holdMs
   if (!(await store.claimPulse(row.id, holdMs + 120_000))) {
     return { id: row.id, skipped: "上一轮脉冲还在跑" };
   }
-  // 先落一条"进行中"状态：一轮要挂 9 分钟，面板不能在这期间显示空白
+  // 先落一条"进行中"状态：一轮几十秒到一分钟，面板不能在这期间显示空白
   const startedAt = Date.now();
   await store.savePulse(row.id, { at: new Date(startedAt).toISOString(), phase: "running", heldSeconds: 0 });
-  await store.log(row.id, "keepalive", `保活会话建立中，预计保持 ${Math.round(holdMs / 1000)}s`);
+  const afterActivateMs = pulseAfterActivateMs(env);
+  await store.log(
+    row.id,
+    "keepalive",
+    `保活会话建立中（激活后保持 ${Math.round(afterActivateMs / 1000)}s，最长 ${Math.round(holdMs / 1000)}s）`,
+  );
   try {
     const result = await withClient(store, row, env, (c) =>
       c.runClink({
         holdMs,
+        exitAfterMs: afterActivateMs,
         shouldStop: async () => !(await store.isKeepalive(row.id)),
       }),
     );

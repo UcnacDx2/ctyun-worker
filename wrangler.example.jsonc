@@ -28,9 +28,11 @@
   "vars": {
     // 图形验证码的 OCR 服务，返回识别出的四个字符
     "OCR_ENDPOINT": "https://orc.1999111.xyz/ocr",
-    // 一轮会话挂多久（秒）
-    "PULSE_SECONDS": "300",
+    // 一轮会话的最长挂机时间（秒），平台反应慢时的封顶
+    "PULSE_SECONDS": "60",
+    // 会话激活后再保持多少秒就收工 —— 平台要的是连接信号，不是时长
+    "PULSE_AFTER_ACTIVATE_SECONDS": "15",
     // 两轮之间隔多久（分钟）
-    "PULSE_INTERVAL_MINUTES": "30"
+    "PULSE_INTERVAL_MINUTES": "20"
   }
 }
