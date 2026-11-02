@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>CtYunKeeper · 天翼云电脑管理台</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body data-authenticated="true">
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="#/"><span class="brand-mark material-symbols-rounded">cloud_sync</span><span><strong>CtYunKeeper</strong><small>云电脑管理台</small></span></a>
+  <nav>
+    <span class="nav-section">管理</span>
+    <a href="#/" data-nav="/"><span class="material-symbols-rounded">dashboard</span><span>仪表盘</span></a>
+    <a href="#/accounts" data-nav="/accounts"><span class="material-symbols-rounded">manage_accounts</span><span>账号管理</span></a>
+    <a href="#/desktops" data-nav="/desktops"><span class="material-symbols-rounded">deployed_code</span><span>云机管理</span></a>
+    <a href="#/tasks" data-nav="/tasks"><span class="material-symbols-rounded">schedule</span><span>任务中心</span></a>
+    <span class="nav-section">系统</span>
+    <a href="#/logs" data-nav="/logs"><span class="material-symbols-rounded">terminal</span><span>日志中心</span></a>
+  </nav>
+  <div class="sidebar-foot"><span class="material-symbols-rounded">deployed_code</span><span><strong>CtYunKeeper</strong><small>Workers 版</small></span></div>
+</aside>
+<header class="topbar">
+  <button class="icon-button sidebar-toggle" type="button" aria-label="切换侧栏"><span class="material-symbols-rounded">menu</span></button>
+  <strong>天翼云电脑自动化管理</strong>
+  <div class="topbar-actions">
+    <button class="icon-button theme-toggle" type="button" data-theme-toggle aria-label="切换网页主题"><span class="local-icon theme-icon-moon" aria-hidden="true"></span><span class="local-icon theme-icon-sun" aria-hidden="true"></span></button>
+    <button class="icon-button" type="button" id="refresh" aria-label="刷新"><span class="material-symbols-rounded">refresh</span></button>
+  </div>
+</header>
+<button class="sidebar-backdrop" type="button"></button>
+<main id="main"></main>
+
+<script>
+const $ = (sel, root = document) => root.querySelector(sel);
+const main = $("#main");
+let accountsCache = [];
+// 一轮挂多久（秒），从 /api/keepalive 读，用来判断"建立中"是不是已经断了
+let pulseSeconds = 300;
+
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data.ok === false) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+function flash(message, tone = "success") {
+  const el = document.createElement("div");
+  el.className = `flash ${tone}`;
+  el.textContent = message;
+  main.prepend(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function ago(ts) {
+  if (!ts) return "—";
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return `${s} 秒前`;
+  if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.round(s / 3600)} 小时前`;
+  return `${Math.round(s / 86400)} 天前`;
+}
+
+// 最近一次脉冲的状态。一轮最多 9 分钟；超过 15 分钟还停在 running，
+// 说明那一轮被打断（部署 / DO 回收），不能一直显示「建立中」。
+function pulseState(r) {
+  if (!r) return { label: "尚未运行", tone: "" };
+  if (r.phase === "running") {
+    const stale = Date.now() - Date.parse(r.at) > (pulseSeconds + 180) * 1000;
+    return { label: stale ? "中断" : "建立中", tone: stale ? "warning" : "" };
+  }
+  if (r.error) return { label: "失败", tone: "warning" };
+  return { label: r.activated ? "已激活" : "未激活", tone: r.activated ? "success" : "warning" };
+}
+
+function pulseText(a, brief = false) {
+  const r = a.lastResult;
+  if (!r) return "—";
+  const { label, tone } = pulseState(r);
+  if (r.phase === "running") return `<span class="pill ${tone}">${label}…</span> <small>${ago(Date.parse(r.at))}</small>`;
+  if (r.error) return brief ? `⚠️ ${esc(r.error.message || "失败")}` : `<span class="pill warning">失败</span> ${esc(r.error.message || "")}`;
+  const mark = r.activated ? "✅" : "⚠️";
+  return brief
+    ? `${mark} ${r.heldSeconds ?? 0}s · ${ago(Date.parse(r.at))}`
+    : `${mark} ${label} · ${r.heldSeconds ?? 0}s · ${ago(Date.parse(r.at))}`;
+}
+
+// ---------------- 页面 ----------------
+
+async function dashboard() {
+  const [{ accounts }, scheduler] = await Promise.all([api("/api/accounts"), api("/api/keepalive")]);
+  accountsCache = accounts;
+  if (scheduler.pulseSeconds) pulseSeconds = scheduler.pulseSeconds;
+  const every = scheduler.pulseIntervalMinutes ?? 30;
+  const running = accounts.filter((a) => a.keepalive).length;
+  const last = accounts.map((a) => a.lastResult).filter(Boolean).sort((x, y) => Date.parse(y.at) - Date.parse(x.at))[0];
+  const tone = running ? "success" : "warning";
+  main.innerHTML = `
+    <header class="page-head"><div><p class="eyebrow">运行状态</p><h1>仪表盘</h1>
+      <p class="page-subtitle">保活会话按设定频率自动续，直到你手动停止。</p></div>
+      <a class="secondary button" href="#/accounts">账号管理</a></header>
+    <section class="metric-grid">
+      <article class="panel metric-card metric-${running ? "result" : "warning"}">
+        <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">cloud_sync</span></span><span class="metric-label">云电脑保活</span><i class="metric-status-dot ${tone}"></i></div>
+        <strong class="metric-value small">${running ? "保活中" : "已停止"}</strong>
+        <span class="metric-note">${running ? `每 ${every} 分钟连一次，每次 ${Math.round(pulseSeconds / 60)} 分钟` : "没有账号在保活"}</span>
+      </article>
+      <article class="panel metric-card metric-accounts">
+        <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">group</span></span><span class="metric-label">账号概况</span></div>
+        <strong class="metric-number">${accounts.length}<em>个账号</em></strong>
+        <span class="metric-note"><b>${running}</b> 个正在保活</span>
+      </article>
+      <article class="panel metric-card">
+        <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">history</span></span><span class="metric-label">最近脉冲</span></div>
+        <strong class="metric-value small">${pulseState(last).label}</strong>
+        <span class="metric-note">${last ? `${last.heldSeconds ?? 0}s · ${ago(Date.parse(last.at))}` : "开启保活后开始计时"}</span>
+      </article>
+      <article class="panel metric-card">
+        <div class="metric-top"><span class="metric-icon"><span class="material-symbols-rounded">schedule</span></span><span class="metric-label">调度器</span></div>
+        <strong class="metric-value small">${scheduler.nextAlarm ? new Date(scheduler.nextAlarm).toLocaleTimeString("zh-CN") : "待命"}</strong>
+        <span class="metric-note">${scheduler.roundStartedAt ? `本轮 ${ago(scheduler.roundStartedAt)}开始` : "尚未运行"}</span>
+      </article>
+    </section>
+    <article class="panel table-panel">
+      <div class="table-wrap"><table><thead><tr><th>账号</th><th>保活</th><th>最近脉冲</th></tr></thead><tbody>
+      ${accounts.map((a) => `<tr><td><strong>${esc(a.nickname || a.username)}</strong><small>${esc(a.username)}</small></td>
+        <td><span class="pill ${a.keepalive ? "success" : "warning"}">${a.keepalive ? "保活中" : "已停止"}</span></td>
+        <td>${pulseText(a)}</td></tr>`).join("") || `<tr><td colspan="3">还没有账号，去<a href="#/accounts">添加一个</a>。</td></tr>`}
+      </tbody></table></div>
+    </article>`;
+}
+
+async function accountsPage() {
+  const { accounts } = await api("/api/accounts");
+  accountsCache = accounts;
+  main.innerHTML = `
+    <header class="page-head"><div><p class="eyebrow">配置</p><h1>账号</h1></div></header>
+    <article class="panel table-panel"><div class="table-wrap"><table>
+      <thead><tr><th>账号</th><th>保活</th><th>设备码</th><th>最近脉冲</th><th>操作</th></tr></thead>
+      <tbody>${accounts.map((a) => `
+        <tr>
+          <td><strong>${esc(a.nickname || a.username)}</strong><small>${esc(a.username)}</small></td>
+          <td><span class="pill ${a.keepalive ? "success" : "warning"}">${a.keepalive ? "保活中" : "已停止"}</span></td>
+          <td><small>${esc(a.deviceCode)}</small></td>
+          <td>${pulseText(a, true)}</td>
+          <td class="action-cell"><div class="actions">
+            <button class="link-button" data-ka="${a.id}" data-on="${a.keepalive ? 0 : 1}">${a.keepalive ? "停止保活" : "开启保活"}</button>
+            <button class="danger-link" data-del="${a.id}">删除</button>
+          </div></td>
+        </tr>`).join("") || `<tr><td colspan="5">还没有账号。</td></tr>`}
+      </tbody></table></div></article>
+    <article class="panel form-panel">
+      <p class="eyebrow">新增</p><h2>添加天翼云账号</h2>
+      <form id="add-form">
+        <div class="form-grid">
+          <label>手机号<input name="username" required autocomplete="username" placeholder="173xxxxxxxx"></label>
+          <label>密码<input name="password" type="password" required autocomplete="current-password"></label>
+        </div>
+        <div class="form-actions"><button class="primary" type="submit">登录并保存</button><small>登录会自动取图形验证码，可能需要几秒</small></div>
+      </form>
+    </article>`;
+
+  $("#add-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const btn = ev.submitter ?? $("#add-form button");
+    btn.disabled = true;
+    btn.textContent = "登录中…";
+    try {
+      const body = Object.fromEntries(new FormData(ev.target));
+      await api("/api/login", { method: "POST", body: JSON.stringify(body) });
+      flash("账号已添加");
+      accountsPage();
+    } catch (e) {
+      flash(`添加失败：${e.message}`, "error");
+      btn.disabled = false;
+      btn.textContent = "登录并保存";
+    }
+  };
+}
+
+async function desktopsPage() {
+  if (!accountsCache.length) accountsCache = (await api("/api/accounts")).accounts;
+  const id = currentAccount();
+  main.innerHTML = `
+    <header class="page-head"><div><p class="eyebrow">运行状态</p><h1>云机管理</h1></div>${accountSelect(id)}</header>
+    <div id="desktop-body"><article class="panel">读取中…</article></div>`;
+  bindAccountSelect(desktopsPage);
+  if (!id) { $("#desktop-body").innerHTML = `<article class="panel">先添加一个账号。</article>`; return; }
+  try {
+    const { desktops } = await api(`/api/accounts/${id}/desktops`);
+    $("#desktop-body").innerHTML = `
+      <article class="panel table-panel"><div class="table-wrap"><table>
+        <thead><tr><th>云机</th><th>状态</th><th>规格</th><th>操作</th></tr></thead>
+        <tbody>${desktops.map((d) => `<tr>
+          <td><strong>${esc(d.name)}</strong><small>${esc(d.id)}</small></td>
+          <td><span class="pill ${/运行|在线/.test(d.status ?? "") ? "success" : "warning"}">${esc(d.status || "未知")}</span></td>
+          <td>${esc(d.flavor || "—")}</td>
+          <td class="action-cell"><div class="actions">
+            <button class="link-button" data-power="poweron" data-did="${esc(d.id)}" data-acc="${id}">开机</button>
+            <button class="link-button" data-power="reboot" data-did="${esc(d.id)}" data-acc="${id}">重启</button>
+            <button class="danger-link" data-power="shutdown" data-did="${esc(d.id)}" data-acc="${id}">关机</button>
+          </div></td></tr>`).join("") || `<tr><td colspan="4">这个账号没有云电脑。</td></tr>`}
+        </tbody></table></div></article>`;
+  } catch (e) {
+    $("#desktop-body").innerHTML = `<article class="panel">读取失败：${esc(e.message)}</article>`;
+  }
+}
+
+async function tasksPage() {
+  if (!accountsCache.length) accountsCache = (await api("/api/accounts")).accounts;
+  const id = currentAccount();
+  main.innerHTML = `
+    <header class="page-head"><div><p class="eyebrow">自动化</p><h1>任务中心</h1></div>${accountSelect(id)}</header>
+    <div id="task-body"><article class="panel">读取中…</article></div>`;
+  bindAccountSelect(tasksPage);
+  if (!id) { $("#task-body").innerHTML = `<article class="panel">先添加一个账号。</article>`; return; }
+  try {
+    const [{ tasks }, { points }] = await Promise.all([
+      api(`/api/accounts/${id}/tasks`),
+      api(`/api/accounts/${id}/points`),
+    ]);
+    $("#task-body").innerHTML = `
+      <article class="panel stat"><p class="eyebrow">当前积分</p><strong>${points}</strong></article>
+      <article class="panel table-panel"><div class="table-wrap"><table>
+        <thead><tr><th>任务</th><th>进度</th><th>状态</th></tr></thead>
+        <tbody>${tasks.map((t) => {
+          const done = t.currentProgress >= t.totalProgress && t.totalProgress > 0;
+          return `<tr><td><strong>${esc(t.taskDefName)}</strong><small>${esc(t.taskDesc || "")}</small></td>
+            <td>${t.currentProgress ?? 0} / ${t.totalProgress ?? 0}</td>
+            <td><span class="pill ${done ? "success" : "warning"}">${done ? "已完成" : "进行中"}</span></td></tr>`;
+        }).join("") || `<tr><td colspan="3">今天没有任务。</td></tr>`}
+        </tbody></table></div></article>`;
+  } catch (e) {
+    $("#task-body").innerHTML = `<article class="panel">读取失败：${esc(e.message)}</article>`;
+  }
+}
+
+async function logsPage() {
+  const { logs } = await api("/api/logs?limit=200");
+  main.innerHTML = `
+    <header class="page-head"><div><p class="eyebrow">诊断</p><h1>日志中心</h1></div>
+      <button class="secondary button" type="button" onclick="logsPage()">刷新</button></header>
+    <article class="panel table-panel"><div class="table-wrap"><table>
+      <thead><tr><th>时间</th><th>账号</th><th>类型</th><th>内容</th></tr></thead>
+      <tbody>${logs.map((l) => `<tr>
+        <td><small>${new Date(l.created_at).toLocaleString("zh-CN")}</small></td>
+        <td><small>${esc(l.username || l.account_id)}</small></td>
+        <td><span class="pill">${esc(l.kind)}</span></td>
+        <td>${esc(l.message)}</td></tr>`).join("") || `<tr><td colspan="4">还没有日志。</td></tr>`}
+      </tbody></table></div></article>`;
+}
+
+// ---------------- 通用 ----------------
+
+function currentAccount() {
+  const fromHash = Number(location.hash.split("/")[2]);
+  return accountsCache.some((a) => a.id === fromHash) ? fromHash : accountsCache[0]?.id;
+}
+
+function accountSelect(selected) {
+  if (!accountsCache.length) return "";
+  return `<label class="inline-filter">账号<select id="account-pick">${accountsCache
+    .map((a) => `<option value="${a.id}" ${a.id === selected ? "selected" : ""}>${esc(a.nickname || a.username)}</option>`)
+    .join("")}</select></label>`;
+}
+
+function bindAccountSelect(rerender) {
+  const pick = $("#account-pick");
+  if (!pick) return;
+  pick.onchange = () => {
+    const page = location.hash.split("/")[1] || "desktops";
+    location.hash = `#/${page}/${pick.value}`;
+    rerender();
+  };
+}
+
+document.addEventListener("click", async (ev) => {
+  const target = ev.target.closest("[data-ka],[data-del],[data-power]");
+  if (!target) return;
+
+  if (target.dataset.ka) {
+    target.disabled = true;
+    try {
+      const enabled = target.dataset.on === "1";
+      await api(`/api/accounts/${target.dataset.ka}/keepalive`, { method: "POST", body: JSON.stringify({ enabled }) });
+      flash(enabled ? "保活已开启" : "保活已停止");
+      route();
+    } catch (e) {
+      flash(`操作失败：${e.message}`, "error");
+      target.disabled = false;
+    }
+    return;
+  }
+
+  if (target.dataset.del) {
+    if (!confirm("删除这个账号？保存的凭据会一并删除。")) return;
+    try {
+      await api(`/api/accounts/${target.dataset.del}`, { method: "DELETE" });
+      flash("账号已删除");
+      route();
+    } catch (e) {
+      flash(`删除失败：${e.message}`, "error");
+    }
+    return;
+  }
+
+  if (target.dataset.power) {
+    const action = target.dataset.power;
+    if (action === "shutdown" && !confirm("确定关机？保活会话会随之断开。")) return;
+    target.disabled = true;
+    try {
+      await api(`/api/accounts/${target.dataset.acc}/power`, {
+        method: "POST",
+        body: JSON.stringify({ action, desktopId: target.dataset.did }),
+      });
+      flash(`已发送${action === "poweron" ? "开机" : action === "reboot" ? "重启" : "关机"}指令`);
+    } catch (e) {
+      flash(`操作失败：${e.message}`, "error");
+    }
+    target.disabled = false;
+  }
+});
+
+$(".sidebar-toggle").onclick = () => document.body.classList.toggle("sidebar-open");
+$(".sidebar-backdrop").onclick = () => document.body.classList.remove("sidebar-open");
+$("#refresh").onclick = () => route();
+
+function route() {
+  const path = location.hash.replace(/^#/, "") || "/";
+  const page = path.split("/")[1] || "";
+  document.querySelectorAll("[data-nav]").forEach((a) => {
+    const navPath = a.dataset.nav;
+    const active = navPath === "/" ? page === "" : path.startsWith(navPath);
+    a.classList.toggle("active", active);
+  });
+  document.body.classList.remove("sidebar-open");
+  const pages = { "": dashboard, accounts: accountsPage, desktops: desktopsPage, tasks: tasksPage, logs: logsPage };
+  (pages[page] || dashboard)().catch((e) => {
+    main.innerHTML = `<article class="panel">加载失败：${esc(e.message)}</article>`;
+  });
+}
+
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>

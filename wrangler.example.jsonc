@@ -1,0 +1,36 @@
+{
+  // 复制成 wrangler.jsonc 再改：cp wrangler.example.jsonc wrangler.jsonc
+  // database_id 先留全 0，deploy.sh 会自己建库并把真实 id 写回来。
+  "name": "ctyun-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "KEEPALIVE", "class_name": "KeepaliveScheduler" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KeepaliveScheduler"] }],
+  // 想绑自有域名就打开这条（pattern 换成你的域名）：
+  // "routes": [{ "pattern": "ctyun.example.com", "custom_domain": true }],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ctyun",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "vars": {
+    // 图形验证码的 OCR 服务，返回识别出的四个字符
+    "OCR_ENDPOINT": "https://orc.1999111.xyz/ocr",
+    // 一轮会话挂多久（秒）
+    "PULSE_SECONDS": "300",
+    // 两轮之间隔多久（分钟）
+    "PULSE_INTERVAL_MINUTES": "30"
+  }
+}

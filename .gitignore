@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.dev.vars
+.secrets.local
+*.log
+
+# 含本账号的 D1 id / 域名，仓库里放模板 wrangler.example.jsonc
+wrangler.jsonc
+
+# 构建产物
+dist/
