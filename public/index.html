@@ -32,7 +32,7 @@
   </div>
 </header>
 <button class="sidebar-backdrop" type="button"></button>
-<main id="main"></main>
+<main class="main-shell" id="main"></main>
 
 <script>
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -328,8 +328,7 @@ document.addEventListener("click", async (ev) => {
   }
 });
 
-$(".sidebar-toggle").onclick = () => document.body.classList.toggle("sidebar-open");
-$(".sidebar-backdrop").onclick = () => document.body.classList.remove("sidebar-open");
+// 侧栏开合交给 app.js（它会区分移动端 sidebar-open 与桌面端 sidebar-collapsed），这里别重复绑。
 $("#refresh").onclick = () => route();
 
 function route() {
